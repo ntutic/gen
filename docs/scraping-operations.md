@@ -7,8 +7,8 @@ and plain Python processing functions. There is no separate workflow service.
 
 | Storage | Content |
 | --- | --- |
-| `sources` | Registered sources and their enabled flags |
-| `scrapers` | Spider registrations synced from spider class attributes |
+| `sources` | Registered sources seeded from the roster |
+| `scrapers` | Spider registrations with enabled flags, synced from spider class attributes |
 | `scrape_jobs` | Job rows: source, kind, status, heartbeats, structured reports |
 | `scrape_source_records` | Original extracted values per job, before shared normalization |
 | `scrape_results` | Validated clean preview/output per processing job |

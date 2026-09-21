@@ -1,2 +1,2 @@
 source_id,name,start_url,source_kind,expected_count
-EXAMPLE,Example Source,https://example.com,static-html,3
+EXAMPLE,Example Source,http://example.invalid/list,static-html,3

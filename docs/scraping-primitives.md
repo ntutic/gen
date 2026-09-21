@@ -56,27 +56,27 @@ loader = RecordLoader(spider=self, response=response, selector=card)
 loader.add_value("source_key", source_key("native-id", record_id))
 loader.add_css("name", "h3::text")
 loader.add_css("url", "a::attr(href)")
-loader.add_css("full_address", "address ::text")
-loader.add_feature("Area", 12000, "sq ft")
+loader.add_feature("Capacity", "1200", "seats")
 yield loader.load_item()
 ```
 
 `RecordLoader` lives in `scraping/crawler/loaders/record_loader.py`. Use the
 native `add_css`, `add_xpath`, and `add_value` methods. Pass the response so
-relative links resolve correctly. Address fragments join; zero and false feature
-values survive. Features always have `{value: string, unit: string|null}`.
-Coordinates must be finite and within latitude/longitude ranges. Missing optional
-fields remain absent. A record needs a name, URL, or address as well as its key.
+relative links resolve correctly. Zero and false feature values survive.
+Features always have `{value: string, unit: string|null}`. Missing optional
+fields remain absent. A record needs a name or URL as well as its key.
 Source staging retains items before validation, including items that bypass the
 loader. Shared processing validates every record before clean staging or publication.
+Published record columns are only `url` and `name`; any other payload keys
+survive in retained source records but are not published.
 
-For an explicitly selected area quantity, `positive_number` from
+For an explicitly selected quantity, `positive_number` from
 `scraping/crawler/processors.py` validates a complete positive number and removes
 thousands separators. Strip only a reviewed unit suffix before calling it; it
-rejects prose, addresses, malformed grouping, and placeholder values. Preserve
-area basis: use `gla`, `Total area`, `Retail Area`, `Owned share of GLA`, or
-`Land area` according to the source, with explicit units. Retain component notes
-separately and do not sum components into an already published total.
+rejects prose, malformed grouping, and placeholder values. Preserve each
+metric's basis: keep source labels, units, and qualifications distinct.
+Retain component notes separately and do not sum components into an already
+published total.
 
 ## Record keys
 
@@ -233,12 +233,11 @@ The JSON includes missing record identities; the terminal shows field and
 feature counts. Repeat `--feature` with exact source feature labels to include
 missing identities for those features, even when absent from every record.
 These are inspection candidates, not proof the source publishes those fields.
-Area diagnostics require a complete positive numeric value and
-a known unit, either explicit or embedded. They distinguish GLA, total/retail
-area, owned share, available space, and land. Generic `Area`/`SF` labels remain
-unspecified. These reports do not infer units, add unlike area types, or treat
-`N/A` and address fragments as usable area. New semantic labels should be added
-to the small explicit label mapping when their meaning has been reviewed.
+Per-feature counts show how many records carry a value plus a histogram of the
+exact source units observed. Coverage does not infer units or compare unlike
+metrics; generic unlabeled measures remain unspecified. Judge numeric
+completeness by counting values with known units separately from merely
+populated feature text.
 
 The denominator is stored records, including any historical imports. Coverage
 describes extracted data; it does not prove that a spider collected the complete
@@ -277,7 +276,7 @@ in a separately queued enrichment consumer, never in a spider or this determinis
 processing stage.
 
 See [operations](scraping-operations.md) for replay, backfills, production pacing,
-and the enrichment hook. CI is unchanged.
+and the enrichment hook.
 
 ### Published features
 

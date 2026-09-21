@@ -21,6 +21,9 @@ class Source(Base):
     website_url: Mapped[str | None] = mapped_column(Text)
     source_kind: Mapped[str | None] = mapped_column(Text)
     expected_count: Mapped[int | None] = mapped_column(Integer)
+    # Ordering dependency: without it, one flush emitting both rows can
+    # insert the scraper first and violate the foreign key.
+    scrapers: Mapped[list[Scraper]] = relationship(back_populates="source", passive_deletes=True)
 
 
 class Scraper(Base):
@@ -30,6 +33,7 @@ class Scraper(Base):
     source_id: Mapped[str] = mapped_column(Text, ForeignKey("sources.id", ondelete="CASCADE"), nullable=False)
     module: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[Source] = relationship(back_populates="scrapers")
 
 
 class ScrapeJob(Base):

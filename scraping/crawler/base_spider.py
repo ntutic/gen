@@ -10,7 +10,9 @@ from scraping.crawler.utils.driver import scroll_to_page_bottom, wait_for_select
 
 class BaseSpider(Spider):
     # Contract: name is the source_id; every spider sets source_kind,
-    # key_description, start_urls, and notes.
+    # key_description, start_urls, and notes. Flip enabled only after
+    # verifying live completeness; the DB mirrors this flag.
+    enabled = False
     source_kind = None
     key_description = None
     notes = "Needs live validation"

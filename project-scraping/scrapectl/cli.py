@@ -8,6 +8,7 @@ from pathlib import Path
 import uvicorn
 from sqlalchemy import func, select
 
+from scrapectl.acceptance import write_receipt
 from scrapectl.coverage import field_coverage, print_coverage
 from scrapectl.db import Session, init_db
 from scrapectl.models import Record, ScrapeJob, Scraper, ScrapeResult, Source, SourceRecord
@@ -69,7 +70,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("upgrade-db")
     commands.add_parser("prepare-db", help="Initialize or back up and upgrade the database before service startup")
     commands.add_parser("scrapers")
-    enable = commands.add_parser("enable", help="Enable a scraper in the database; the spider files carry no flag")
+    enable = commands.add_parser("enable", help="Manual enable after review; dispatcher acceptance uses verified receipts")
     enable.add_argument("scraper_id")
     disable = commands.add_parser("disable", help="Disable a scraper in the database")
     disable.add_argument("scraper_id")
@@ -87,6 +88,7 @@ def parser() -> argparse.ArgumentParser:
     check = commands.add_parser("check")
     check.add_argument("scraper_id")
     check.add_argument("--output", type=Path, help="Write staged preview items as JSONL")
+    check.add_argument("--receipt", type=Path, help="Write the concrete preview job/database pointer for acceptance")
     enqueue_parser = commands.add_parser("enqueue")
     enqueue_parser.add_argument("scraper_id", nargs="?")
     enqueue_parser.add_argument("--all", action="store_true")
@@ -101,6 +103,7 @@ def parser() -> argparse.ArgumentParser:
     for command in (replay, reprocess):
         command.add_argument("--publish", action="store_true")
         command.add_argument("--output", type=Path)
+        command.add_argument("--receipt", type=Path, help="Write a job pointer; reprocessing does not qualify for parser acceptance")
     worker = commands.add_parser("worker")
     worker.add_argument("--once", action="store_true")
     worker.add_argument("--concurrency", type=int, default=10, help="Maximum simultaneous scrape jobs (default: 10)")
@@ -217,12 +220,12 @@ def main(argv: list[str] | None = None) -> int:
             job = enqueue(session, source.scraper_id, publish=args.publish,
                           kind=args.command, source_job_id=source.id)
             session.commit()
-        return _execute_preview(job.id, args.output)
+        return _execute_preview(job.id, args.output, args.receipt)
     if args.command == "check":
         with Session() as session:
             job = enqueue(session, args.scraper_id, publish=False)
             session.commit()
-        return _execute_preview(job.id, args.output)
+        return _execute_preview(job.id, args.output, args.receipt)
     if args.command == "enqueue":
         with Session() as session:
             if bool(args.scraper_id) == args.all:
@@ -252,7 +255,10 @@ def main(argv: list[str] | None = None) -> int:
     raise AssertionError(args.command)
 
 
-def _execute_preview(job_id: int, output_path: Path | None) -> int:
+def _execute_preview(job_id: int, output_path: Path | None, receipt_path: Path | None = None) -> int:
+    # Never leave a previous successful pointer behind when this attempt fails.
+    if receipt_path is not None:
+        receipt_path.unlink(missing_ok=True)
     success = run_one(job_id)
     with Session() as session:
         job = session.get(ScrapeJob, job_id)
@@ -266,4 +272,11 @@ def _execute_preview(job_id: int, output_path: Path | None) -> int:
                     output.write(json.dumps(item.payload, ensure_ascii=False) + "\n")
         if not success:
             print(job.log)
+        elif receipt_path is not None:
+            url = session.get_bind().url
+            if not url.drivername.startswith("sqlite") or not url.database or url.database == ":memory:":
+                raise ValueError("Acceptance receipts require a file-backed SQLite database")
+            write_receipt(receipt_path, source_id=job.scraper_id, job_id=job.id,
+                          database_path=Path(url.database))
+            print(f"Preview receipt: {receipt_path}")
     return 0 if success else 1

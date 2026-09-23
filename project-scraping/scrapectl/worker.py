@@ -13,6 +13,7 @@ from threading import Event, Thread
 
 from sqlalchemy import func, select, update
 
+from scrapectl.acceptance import implementation_digest, runtime_digest
 from scrapectl.db import Session
 from scrapectl.models import ScrapeJob, Scraper, SourceRecord, utc_now
 from scrapectl.processing import process_job, publish_job
@@ -21,6 +22,8 @@ from scrapectl.settings import DATABASE_URL_ENV, REPO_ROOT, database_url
 from scraping.crawler.report import check_report
 
 MAX_LOG_CHARS = 1_000_000
+# A long-lived worker must not label old imported processing code as new code.
+STARTUP_RUNTIME_DIGEST = runtime_digest(Path(REPO_ROOT))
 
 #: Eval/check previews (anything that is not a live publishing run) crawl at
 #: most 1 request per 2 seconds. AutoThrottle clamps its adaptive delay at
@@ -63,11 +66,22 @@ def _heartbeat(job_id: int):
         thread.join()
 
 
+def _job_digest(job: ScrapeJob) -> str:
+    # Reprocessing only uses the normalizer; it must remain possible after a
+    # source spider is retired. It never qualifies for parser acceptance.
+    if job.kind == "reprocess":
+        return runtime_digest(Path(REPO_ROOT))
+    return implementation_digest(Path(REPO_ROOT), job.scraper_id)
+
+
 def _run_claimed(job: ScrapeJob) -> bool:
     log = ""
     report = None
     try:
         with _heartbeat(job.id):
+            if runtime_digest(Path(REPO_ROOT)) != STARTUP_RUNTIME_DIGEST:
+                raise ValueError("Shared code changed after worker startup; restart the worker")
+            revision = _job_digest(job)
             with Session() as session:
                 scraper = session.get(Scraper, job.scraper_id)
                 if scraper is None:
@@ -118,6 +132,7 @@ def _run_claimed(job: ScrapeJob) -> bool:
                     if staged != count:
                         raise ValueError(f"Crawl reported {count} records but staged {staged}")
                     current.report = {"crawl": report}
+                current.report = {**current.report, "implementation_sha256": revision}
                 try:
                     current.result_count = process_job(session, job.id)
                 except ValueError:
@@ -128,6 +143,8 @@ def _run_claimed(job: ScrapeJob) -> bool:
                 session.commit()
                 if current.report.get("processing", {}).get("errors"):
                     raise ValueError("Normalization failed; see processing report")
+            if _job_digest(job) != revision:
+                raise ValueError("Implementation changed during the run; repeat the preview with stable code")
             with Session() as session:
                 current = session.get(ScrapeJob, job.id)
                 if current.status != "running":

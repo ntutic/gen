@@ -1,134 +1,129 @@
 # Scraping operations
 
-The system uses ordinary Scrapy spiders, SQLite jobs, compressed response files,
-and plain Python processing functions. There is no separate workflow service.
+Ordinary Scrapy spiders, SQLite jobs, compressed response files, and plain Python
+processing functions own execution. There is no separate workflow service.
 
 ## Storage and publication
 
 | Storage | Content |
 | --- | --- |
 | `sources` | Registered sources seeded from the roster |
-| `scrapers` | Spider registrations synced from spider files; the database owns the enabled flag |
-| `scrape_jobs` | Job rows: source, kind, status, heartbeats, structured reports |
-| `scrape_source_records` | Original extracted values per job, before shared normalization |
-| `scrape_results` | Validated clean preview/output per processing job |
-| `records` | Published records; stable IDs and source observation times |
-| `record_features` | Published features keyed by record and name |
-| `feature_units` | Unit names reused by exact source label |
+| `scrapers` | Spider registrations; the database owns the enabled flag |
+| `scrape_jobs` | Source, kind, status, heartbeats, versions and structured reports |
+| `scrape_source_records` | Selected source values, before shared normalization |
+| `scrape_results` | Validated clean job-scoped output |
+| `records` | Published entities/facts, explicit keys and observation times |
+| `record_features` / `feature_units` | Published values and exact source unit labels |
 
-Source records survive normalization errors, missing keys, and duplicate keys.
-The worker requires a complete extraction report, matching source count, and no
-processing errors before publication. Publication is transactional and serializes
-freshness checks with other publishers. Historical input cannot overwrite newer
-observations. Records absent from a scrape are not automatically retired.
+The worker requires a complete nonempty crawl report, matching retained/staged
+counts and no processing errors before publication. Publication is transactional
+and serializes freshness checks. Historical inputs cannot overwrite newer
+observations. Missing entities are not automatically retired; features absent
+from an updated entity's observation are removed. There is no generic automatic
+record-count regression rule: reviewed totals and exhaustion assertions belong
+to the source spider. See [the project contract](project-contract.md).
 
-Run `python -m scrapectl init-db` to initialize a new database or bring an
-existing one to the current schema. A shared database-side file lock serializes
-concurrent starts. Stop workers and resolve running jobs when a schema upgrade is
-required; a current schema needs no worker interruption. Startup refuses an
-outdated schema rather than silently migrating a hosted database.
+`init-db` initializes the schema and registrations. Outdated schemas require an
+explicit upgrade: stop workers, resolve running jobs, and use the existing
+`upgrade-db`/`prepare-db` workflow. A shared database file lock serializes upgrades.
+This change adds report fields, not database columns.
 
-## Weekly queue and pacing
+## Queue and pacing
 
-The weekly scheduler should invoke this from the checkout using its virtualenv:
+The host scheduler, not the template, owns recurring timing:
 
 ```bash
 .venv/bin/python -m scrapectl enqueue --all
+.venv/bin/python -m scrapectl worker
 ```
 
-This enqueues enabled sources and reuses any pending/running production job
-for a source (`scrapectl/queue.py`). It does not suppress a new scrape after the
-previous job completes. `enqueue EXAMPLE` selects one source. Run
-`python -m scrapectl worker` to consume up to ten scrape jobs concurrently
-(`scrapectl/worker.py`), refilling each slot as its job finishes. Use
-`worker --concurrency N` to set a different limit, or `worker --once` to process
-one pending job. Each scrape runs in its own subprocess with its own heartbeat
-and publication checks. These commands do not install a scheduler or host
-service; the existing host scheduler owns weekly timing. Site-specific dispatch
-wrappers such as `ops/dispatch_sources.py` may choose the source set.
+Enqueue reuses pending/running production jobs for the same source. A completed
+job does not suppress the next scheduled scrape. `worker --concurrency N` controls
+simultaneous jobs (default ten); `worker --once` processes one pending job. Each
+crawl gets a subprocess, heartbeat and publication checks.
 
-Production live jobs (`publish=True`) use a fixed minimum ten-second interval per
-hostname, across protocols, ports, queued jobs, and worker processes
-(`scraping/crawler/rate_limit.py`). Ordinary HTTP holds the domain lock through
-request completion and then waits ten seconds before the next request. HTTP
-429/503 `Retry-After` can extend that cooldown. Browser HTTP requests, including
-navigation, page assets, and action-triggered fetches, are paused through
-Chrome's Fetch interception and released through the same domain gate. Scrapy
-AutoThrottle can slow HTTP down further. Preview live checks retain ordinary
-Scrapy pacing and do not participate in the production gate. Replay is offline.
+Production live jobs share a fixed minimum ten-second interval per exact
+hostname across protocols, ports and processes. HTTP holds the domain lock
+through download completion; 429/503 `Retry-After` may extend the cooldown.
+Browser navigation, assets and action-triggered requests use the same gate
+through Chrome interception. Scrapy AutoThrottle may slow requests further.
+Preview live jobs retain ordinary Scrapy pacing (the worker requests a two-second
+delay); they do not participate in the production gate. Replay is offline.
 
-All workers must share `VCLIST_CAPTURE_DIR` (default `var/captures`,
-`scraping/crawler/capture.py`) on a filesystem supporting cross-process `flock`.
-Keep its `.throttle` directory while workers run; separate capture volumes do
-not share limits. The gate groups exact hostnames, not all subdomains of a
-registrable domain.
+Pacing state is independent of captures. All coordinating processes must use the
+same `VCLIST_RATE_LIMIT_DIR` on a filesystem supporting cross-process `flock`.
+The default is `$XDG_STATE_HOME/scraping/rate-limit`, falling back to
+`~/.local/state/scraping/rate-limit`. This coordinates projects running as the
+same OS user even when their capture directories differ. Separate users or
+containers need an explicit shared directory/mount. Do not delete or switch the
+pacing directory while workers are active. Stop old workers before migrating
+from the former capture-local `.throttle` directory, then start all workers
+with the new setting; mixed versions do not share limits.
 
+The gate groups exact hostnames, not all subdomains of a registrable domain.
 Browser helpers support one instrumented tab. Unsupported child worker/iframe
-contexts are held paused and fail the job, preventing unpaced traffic. Browser
-service-worker bypass and disabled cache keep page requests on the instrumented
-path. A browser source needing such a context needs a helper extension and live
-verification before production use. New browser initialization remains proxied.
+contexts fail closed rather than allowing unpaced traffic. Such sources need a
+reviewed helper extension, not a direct-network fallback.
 
-`VCLIST_CRAWL_TIMEOUT_SECONDS` defaults to 86400 to accommodate the slower rate;
-the worker allows another sixty seconds for process shutdown. Browser page and
-interaction waits remain bounded. Large dynamic pages may need explicit wait
-budgets in their spider after completeness verification.
+`VCLIST_CRAWL_TIMEOUT_SECONDS` defaults to 86400, with sixty seconds for subprocess
+shutdown. Browser page/interaction waits remain bounded. Runtime timeouts are
+separate from the contributor's bounded exploration budget.
 
-## Replay, reprocessing, and backfills
+## Captures, replay and reprocessing
 
 ```bash
-python -m scrapectl check EXAMPLE --output /tmp/example.jsonl
-python -m scrapectl replay 123 --output /tmp/replayed.jsonl
-python -m scrapectl reprocess --job 123 --output /tmp/processed.jsonl
-python -m scrapectl reprocess --source EXAMPLE --publish
+python -m scrapectl check SOURCE --output /tmp/source.jsonl --receipt /tmp/preview.json
+python -m scrapectl replay JOB_ID --output /tmp/replayed.jsonl --receipt /tmp/replay.json
+python -m scrapectl reprocess --job JOB_ID --output /tmp/processed.jsonl
 ```
 
-These commands create new jobs. Replay runs the current spider using a selected
-job's saved responses, before proxy or browser initialization. Missing/invalid
-captures fail the job; there is no live-network fallback and no proxy credentials
-are needed. Request identity includes URL, method, body, selected representation
-headers, and browser variant. Use `request.meta['capture_variant']` for distinct
-prepared representations of the same URL. Repeated captures retain previous
-attempt files; replay uses the latest response for that request identity.
+Live jobs store compressed responses or prepared browser DOM under
+`VCLIST_CAPTURE_DIR` (default `var/captures`). Captures and the corresponding
+SQLite database must be retained together. Separate contributor databases use
+separate capture directories so job IDs cannot collide.
 
-Browser replay feeds the saved prepared DOM to the parser. It does not rerun clicks,
-scrolling, or JavaScript; changes to browser preparation or newly needed endpoints
-may require a new live capture. Replay is for rerunning extraction, not reproducing
-a browser's complete network session or exact retry timing.
+Replay runs the current parser from saved responses before proxy/browser
+initialization. Missing/invalid captures fail with no network fallback. Request
+identity includes URL, method, body, selected representation headers and browser
+variant. Use `request.meta['capture_variant']` for explicitly distinct prepared
+representations. Repeated captures preserve attempt files; replay reads the
+latest response for each request identity. No credentials are required offline.
 
-Reprocessing does not launch Scrapy or make network requests. It runs the current
-normalizer against retained source records. `--source` selects the latest retained
-source job by observation time; `--job` selects an explicit input. Reprocessing
-requires a verified complete crawl and matching retained record count. A crawl with
-normalization errors can be reprocessed after fixing the normalizer; a partial crawl
-cannot be treated as a complete roster. Reprocessing/replay chains resolve to
-their retained input job. Observation times remain unchanged.
+Browser replay feeds saved DOM to callbacks. It does not rerun clicks, scrolling
+or JavaScript and cannot validate newly changed browser preparation. New request
+paths or preparation changes require a new live preview. Reprocessing runs the
+current normalizer on retained source values without launching Scrapy or making
+requests; it is not evidence for the current parser. It requires a verified
+complete source crawl and matching retained counts. Observation times remain
+unchanged. `--publish` uses the same validation/freshness guards.
 
-Replay and reprocessing default to preview; `--publish` runs the same validation and
-freshness guards as a live publication. Preview JSONL contains clean output; a failed
-preview may contain only the valid subset. Check its exit status and processing
-report before using it. The original source rows remain unchanged.
+A failed preview's JSONL can contain only the valid subset: never infer success
+from the presence of a file. Check job status and reports. `--receipt` writes a
+pointer to the actual successful job and database; it is not a success certificate.
+Automated acceptance reopens the assigned database read-only and checks the
+actual job, counts, implementation fingerprint and output digest. It rejects
+failed jobs, stale code, wrong databases and ordinary reprocess jobs. An offline
+replay needs a successfully completed live ancestor. Historical runs lacking
+implementation fingerprints need a fresh preview under the new worker.
 
-Captures and source records have **no automatic expiry**. Keep them as long as you
-need to recover previously unextracted data. Deleting a capture job directory removes
-its replay ability but leaves source-record reprocessing available. Do not delete
-`.throttle` during operation. Back up the SQLite database and capture directory
-together; captures alone are insufficient to identify and replay a job.
+Shared runtime changes require restarting long-lived workers. Workers refuse to
+label previously imported processing code as the newly edited source. Source
+edits during a run also fail rather than producing misleading acceptance evidence.
+See [contributor dispatch](agent-dispatch.md) for the review/apply boundary.
 
-## Enrichment hook
+Captures and source values have no automatic expiry. Deleting a capture job
+folder removes replay ability but leaves source-value reprocessing available.
+Back up SQLite and captures together. Pacing state is a separate operational
+resource, not an artifact to remove with a disposable preview.
 
-External enrichment — filling fields the source does not publish — runs as a
-separately queued consumer over published records, never inside a spider or the
-deterministic processing stage. Any future consumer must be idempotent, record
-its provider and version with each result, and never overwrite source-observed
-values. Queueing, retries, and inspection for enrichment are future work; this
-document defines only the hook.
+## Recovery and enrichment
 
-## Recovery and inspection
+Workers heartbeat every thirty seconds. `recover --stale-seconds N` marks expired
+running jobs failed; partial values and diagnostics remain for investigation.
+Enqueue again to refetch, replay saved responses, or reprocess complete inputs.
+Do not publish partial output as a replacement for a complete observation.
 
-Workers heartbeat every thirty seconds. After an interruption, running jobs with
-expired heartbeats are marked failed; their retained inputs and partial results
-stay available for diagnosis, and partial work is never silently published.
-Enqueue a new live job to refetch, replay retained responses, or reprocess a
-complete source job. Job inspection covers job kinds, source jobs, versions,
-structured reports, and logs.
+External enrichment runs as a separately queued consumer, never inside the
+spider or deterministic normalization. A future consumer must be idempotent,
+record provider/version and preserve observed values. This is an extension
+boundary, not an enrichment service implemented by the template.

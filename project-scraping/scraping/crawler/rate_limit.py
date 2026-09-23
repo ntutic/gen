@@ -1,63 +1,12 @@
-"""Cross-process domain pacing for workers sharing the capture volume."""
+"""Scrapy download pacing; lock state is independent of capture directories."""
 from __future__ import annotations
 
 import asyncio
-import fcntl
-import hashlib
-import time
-from email.utils import parsedate_to_datetime
-from pathlib import Path
-from urllib.parse import urlsplit
 
 from scrapy.core.downloader.handlers.http11 import HTTP11DownloadHandler
 
-from scraping.crawler.capture import capture_directory
-
-
-class DomainGate:
-    def __init__(self, root: Path | None = None, interval: float = 10):
-        self.root = root or capture_directory() / ".throttle"
-        self.interval = interval
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def acquire(self, url: str):
-        domain = urlsplit(url).hostname
-        if not domain:
-            raise ValueError("Cannot pace a request without a hostname")
-        path = self.root / hashlib.sha256(domain.lower().encode()).hexdigest()
-        stream = path.open("a+")
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX)
-            stream.seek(0)
-            last = float(stream.read() or 0)
-            delay = last + self.interval - time.time()
-            if delay > 0:
-                time.sleep(delay)
-            # Leave a timestamp even if the worker is killed during dispatch.
-            stream.seek(0)
-            stream.truncate()
-            stream.write(str(time.time()))
-            stream.flush()
-            return stream
-        except BaseException:
-            stream.close()
-            raise
-
-    def release(self, stream, cooldown: float = 0):
-        try:
-            stream.seek(0)
-            stream.truncate()
-            stream.write(str(time.time() + max(0, cooldown - self.interval)))
-            stream.flush()
-        finally:
-            stream.close()
-
-    def run(self, url: str, start=lambda: None):
-        stream = self.acquire(url)
-        try:
-            return start()
-        finally:
-            self.release(stream)
+from scraping.crawler.domain_gate import DomainGate as DomainGate
+from scraping.crawler.domain_gate import retry_after_seconds as retry_after_seconds
 
 
 def production_live(spider) -> bool:
@@ -77,8 +26,6 @@ class PacedHTTPDownloadHandler(HTTP11DownloadHandler):
         try:
             stream = await asyncio.shield(acquire)
         except asyncio.CancelledError:
-            # A thread waiting for flock cannot be cancelled; release its eventual
-            # lock so a crawl timeout never strands the shared domain gate.
             acquire.add_done_callback(lambda task: gate.release(task.result()) if not task.exception() else None)
             raise
         cooldown = 0
@@ -89,15 +36,3 @@ class PacedHTTPDownloadHandler(HTTP11DownloadHandler):
             return response
         finally:
             gate.release(stream, cooldown)
-
-
-def retry_after_seconds(value: bytes | None) -> float:
-    if not value:
-        return 0
-    try:
-        text = value.decode("ascii")
-        if text.strip().isdigit():
-            return max(0, int(text))
-        return max(0, parsedate_to_datetime(text).timestamp() - time.time())
-    except (UnicodeError, ValueError, TypeError, OverflowError):
-        return 0

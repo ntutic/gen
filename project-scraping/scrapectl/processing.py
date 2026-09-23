@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
+from scrapectl import project_contract
 from scrapectl.identity import record_hash
 from scrapectl.models import FeatureUnit, Record, RecordFeature, ScrapeJob, Scraper, ScrapeResult, SourceRecord, utc_now
 from scraping.crawler.processors import clean_features, clean_text
@@ -74,6 +75,7 @@ def normalize_payload(item: dict[str, Any], source_id: str) -> dict[str, Any]:
     )
     if not any(payload.get(field) for field in ("name", "url")):
         raise ValueError("record requires at least a name or URL")
+    project_contract.validate_payload(payload)
     return payload
 
 

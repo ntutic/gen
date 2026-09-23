@@ -1,0 +1,18 @@
+{
+  "name": "vclist-frontends",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:admin && npm run build:web",
+    "build:admin": "APP=admin vite build",
+    "build:web": "APP=web vite build"
+  },
+  "dependencies": {
+    "@tanstack/vue-query": "^5",
+    "vue": "^3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5",
+    "vite": "^6"
+  }
+}

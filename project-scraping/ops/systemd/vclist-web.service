@@ -1,0 +1,18 @@
+[Unit]
+Description=Vclist record browser and public API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+ExecStartPre="@REPO_ROOT@/.venv/bin/python" -m scrapectl prepare-db
+ExecStart="@REPO_ROOT@/.venv/bin/python" -m scrapectl serve --host 127.0.0.1 --port @PORT@
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

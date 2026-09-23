@@ -1,0 +1,16 @@
+.env
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+vclist.db
+vclist.db-shm
+vclist.db-wal
+*.upgrade.lock
+var/
+*.egg-info/
+downloaded_files/
+latest_logs/
+node_modules/
+ci/ports.env

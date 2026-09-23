@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Run a project generator: gen <name> [args...].
+
+Any subdirectory containing a `generate-project.py` is a generator, so new
+ones need no registration. The generator runs under its own `.venv` Python
+when one exists, otherwise under this interpreter.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+
+def generators() -> dict[str, Path]:
+    found = {}
+    for child in sorted(ROOT.iterdir()):
+        script = child / "generate-project.py"
+        if child.is_dir() and script.is_file():
+            found[child.name] = script
+    return found
+
+
+def main(argv: list[str]) -> int:
+    available = generators()
+    if not argv or argv[0] in ("-h", "--help"):
+        print("usage: gen <generator> [args...]")
+        print("generators:")
+        for name in available:
+            print(f"  {name}")
+        return 0
+    name, rest = argv[0], argv[1:]
+    if name not in available:
+        known = ", ".join(available) or "none"
+        print(f"error: unknown generator {name!r} (available: {known})", file=sys.stderr)
+        return 2
+    script = available[name]
+    venv_python = script.parent / ".venv" / "bin" / "python"
+    python = str(venv_python) if venv_python.is_file() else sys.executable
+    os.execv(python, [python, str(script), *rest])
+    raise AssertionError("unreachable")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
